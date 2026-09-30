@@ -1,0 +1,858 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#E8E7E1">
+<title>LCD JUMP</title>
+<style>
+:root{--paper:#E8E7E1;--ink:#292A27;--muted:#73746C;--ghost:#D6D6CE}
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;background:var(--paper);color:var(--ink);overflow:hidden;touch-action:none;overscroll-behavior:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;font-family:"Courier New",monospace}
+body{min-height:100dvh;display:flex;align-items:center;justify-content:center}
+#game-wrap{position:relative;width:100%;height:100%;display:flex;align-items:center;justify-content:center}
+canvas{display:block;background:var(--paper);border:0;image-rendering:pixelated;image-rendering:crisp-edges}
+.overlay{position:absolute;inset:0;z-index:20;display:flex;flex-direction:column;justify-content:center;align-items:center;background:rgba(232,231,225,.97);text-align:center;padding:max(24px,env(safe-area-inset-top)) max(24px,env(safe-area-inset-right)) max(24px,env(safe-area-inset-bottom)) max(24px,env(safe-area-inset-left))}
+.hidden{display:none}
+.eyebrow{font-size:10px;letter-spacing:3px;margin-bottom:18px;color:var(--muted)}
+h1{margin:0 0 22px;font-size:34px;line-height:1.1;letter-spacing:-1px}
+p{margin:6px 0;color:var(--muted);font-size:12px;letter-spacing:1px}
+button{margin-top:26px;padding:13px 28px;border:2px solid var(--ink);background:var(--ink);color:var(--paper);font:700 15px "Courier New",monospace;letter-spacing:2px;cursor:pointer}
+button:active{transform:translateY(2px)}
+button:focus-visible{outline:2px dashed var(--ink);outline-offset:5px}
+button:disabled{background:var(--ghost);color:var(--muted);border-color:var(--ghost)}
+#retry-button{margin-top:12px;background:transparent;color:var(--ink)}
+#continue-note{max-width:250px;margin-top:20px;font-size:9px;line-height:1.6}
+#final-score{font-size:24px;font-weight:bold;color:var(--ink)}
+#title-player{width:64px;height:64px;margin:0 0 24px;background:transparent}
+</style>
+</head>
+<body>
+<div id="game-wrap">
+<canvas id="game"></canvas>
+
+<div id="start-screen" class="overlay">
+<p class="eyebrow">LCD POCKET GAME</p>
+<canvas id="title-player" width="64" height="64" aria-hidden="true"></canvas>
+<h1>LCD JUMP</h1>
+<p>PRESS = DIRECTION</p>
+<p>HOLD = POWER</p>
+<p>RELEASE = JUMP</p>
+<button id="start-button" disabled>LOADING...</button>
+</div>
+
+<div id="game-over-screen" class="overlay hidden">
+<p class="eyebrow">END OF RUN</p>
+<h1>GAME OVER</h1>
+<p id="final-score">HEIGHT: 000</p>
+<p id="final-time">TIME: 0.00</p>
+<p id="best-score">BEST: 000</p>
+<p id="continue-note">CONTINUE = PRACTICE / RECORDS DISABLED</p>
+<button id="continue-button">CONTINUE</button>
+<button id="retry-button">RETRY</button>
+</div>
+</div>
+
+<script>
+(() => {
+const canvas=document.getElementById("game");
+const ctx=canvas.getContext("2d");
+const startScreen=document.getElementById("start-screen");
+const gameOverScreen=document.getElementById("game-over-screen");
+const startButton=document.getElementById("start-button");
+const continueButton=document.getElementById("continue-button");
+const retryButton=document.getElementById("retry-button");
+const finalScore=document.getElementById("final-score");
+const finalTime=document.getElementById("final-time");
+const bestScore=document.getElementById("best-score");
+
+const W=360,H=640;
+canvas.width=W; canvas.height=H;
+ctx.imageSmoothingEnabled=false;
+
+const spriteSheet=new Image();
+let spriteReady=false;
+let activeSprite=spriteSheet;
+
+const FRAME_W=64,FRAME_H=64;
+const LCD={paper:"#E8E7E1",ink:"#292A27",muted:"#73746C",ghost:"#D6D6CE"};
+const FRAME_IDLE=0,FRAME_STEP=1,FRAME_JUMP=0;
+
+// The supplied sheet is a 12x enlargement of two 64x64 frames.
+// Normalize to two 64x64 frames. Only the outer black matte is transparent.
+// The pale eyes and mouth are opaque LCD paper, so platforms cannot show through.
+function prepareSprite(source){
+    const c=document.createElement("canvas");
+    c.width=128;c.height=64;
+    const g=c.getContext("2d");
+    g.imageSmoothingEnabled=false;
+    g.drawImage(source,0,0,128,64);
+    const pixels=g.getImageData(0,0,128,64);
+    for(let i=0;i<pixels.data.length;i+=4){
+        const tone=(pixels.data[i]+pixels.data[i+1]+pixels.data[i+2])/3;
+        pixels.data[i+3]=tone>18?255:0;
+        const face=tone>=85;
+        pixels.data[i]=face?232:41;
+        pixels.data[i+1]=face?231:42;
+        pixels.data[i+2]=face?225:39;
+    }
+    g.putImageData(pixels,0,0);
+    return c;
+}
+spriteSheet.onload=()=>{
+    if(spriteSheet.naturalWidth!==spriteSheet.naturalHeight*2){
+        startButton.textContent="SPRITE ERROR";
+        return;
+    }
+    activeSprite=prepareSprite(spriteSheet);
+    spriteReady=true;
+    const preview=document.getElementById("title-player").getContext("2d");
+    preview.imageSmoothingEnabled=false;
+    preview.drawImage(activeSprite,0,0,64,64,0,0,64,64);
+    startButton.disabled=false;
+    startButton.textContent="START";
+};
+spriteSheet.onerror=()=>{startButton.textContent="SPRITE ERROR";};
+spriteSheet.src="data:image/png;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gIoSUNDX1BST0ZJTEUAAQEAAAIYAAAAAAIQAABtbnRyUkdCIFhZWiAAAAAAAAAAAAAAAABhY3NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA9tYAAQAAAADTLQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlkZXNjAAAA8AAAAHRyWFlaAAABZAAAABRnWFlaAAABeAAAABRiWFlaAAABjAAAABRyVFJDAAABoAAAAChnVFJDAAABoAAAAChiVFJDAAABoAAAACh3dHB0AAAByAAAABRjcHJ0AAAB3AAAADxtbHVjAAAAAAAAAAEAAAAMZW5VUwAAAFgAAAAcAHMAUgBHAEIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFhZWiAAAAAAAABvogAAOPUAAAOQWFlaIAAAAAAAAGKZAAC3hQAAGNpYWVogAAAAAAAAJKAAAA+EAAC2z3BhcmEAAAAAAAQAAAACZmYAAPKnAAANWQAAE9AAAApbAAAAAAAAAABYWVogAAAAAAAA9tYAAQAAAADTLW1sdWMAAAAAAAAAAQAAAAxlblVTAAAAIAAAABwARwBvAG8AZwBsAGUAIABJAG4AYwAuACAAMgAwADEANv/bAEMAAwICAwICAwMDAwQDAwQFCAUFBAQFCgcHBggMCgwMCwoLCw0OEhANDhEOCwsQFhARExQVFRUMDxcYFhQYEhQVFP/bAEMBAwQEBQQFCQUFCRQNCw0UFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFP/AABEIAwAGAAMBIgACEQEDEQH/xAAcAAEBAQADAQEBAAAAAAAAAAAABQYCBAcDCAn/xAAuEAEAAQEFBgUFAQEBAAAAAAAAAQIDBRUzUQQWYXGBkQYRMnKSMTRBscETIRL/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8A/lUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA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";
+
+const CONFIG={
+    PLAYER_SIZE:48,
+    GRAVITY:980,
+    MAX_FALL_SPEED:820,
+    MIN_JUMP_VY:410,
+    MAX_JUMP_VY:720,
+    MAX_VX:250,
+    AIM_SPEED:0.72,
+    CHARGE_TIME:0.85,
+    STEP_FPS:5,
+    METER_W:72,
+    METER_H:7,
+    METER_MARGIN:8,
+    POWER_GAP:14,
+    PLATFORM_H:8,
+    LAND_MARGIN_X:21,
+    LAND_TOLERANCE:5,
+    CAMERA_LINE:0.44,
+    WALL_BOUNCE:1.0
+};
+
+function resize(){
+    const scale=Math.min(innerWidth/W,innerHeight/H);
+    canvas.style.width=Math.floor(W*scale)+"px";
+    canvas.style.height=Math.floor(H*scale)+"px";
+    ctx.imageSmoothingEnabled=false;
+}
+addEventListener("resize",resize);
+resize();
+
+let gameState="title";
+let lastTime=0,elapsed=0;
+let playTime=0;
+let cameraY=0;
+let platforms=[];
+let nextPlatformY=0,nextStep=0;
+let highestStep=0;
+
+function loadBest(){
+    try{
+        const value=Number(localStorage.getItem("pixelJumpBest")||0);
+        return Number.isFinite(value)?value:0;
+    }catch(err){
+        console.warn("High score storage is unavailable.",err);
+        return 0;
+    }
+}
+
+function saveBest(value){
+    try{
+        localStorage.setItem("pixelJumpBest",String(value));
+    }catch(err){
+        console.warn("Could not save high score.",err);
+    }
+}
+
+let best=loadBest();
+let bestBeforeRun=best;
+let continueUsed=false;
+let checkpoint=null;
+
+let aimPhase=0;
+let charging=false;
+let charge=0;
+let chargePhase=0;
+let lockedAim=0;
+let directionLocked=false;
+
+const player={
+    x:0,y:0,vx:0,vy:0,
+    w:CONFIG.PLAYER_SIZE,
+    h:CONFIG.PLAYER_SIZE,
+    grounded:true,
+    currentPlatformId:0,
+    currentStep:0,
+    facing:1
+};
+
+const rand=(a,b)=>a+Math.random()*(b-a);
+const lerp=(a,b,t)=>a+(b-a)*t;
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+
+// 難易度は「出発足場のstep」で判定。旧50～70段の別処理は統合。
+// step 0も導入区間として扱う。段階境界・上限をここで調整できる。
+const DIFFICULTY={
+    EASY_END:5, GUARANTEED_END:12, MIXED_END:20, CAP_STEP:100,
+    EASY_WIDTH:[152,172], MID_WIDTH:[112,132],
+    LATE_WIDTH:[94,120], CAP_WIDTH:[52,90],
+    EARLY_GAP:110, MIX_LOW:114, MIX_HIGH:166,
+    LATE_GAP:144, GAP_JITTER:2, NO_SKIP_MARGIN:10,
+    SINGLE_POWER:0.72, SKIP_POWER:0.98, // 一段登りは72%で届き、二段先には届かない。
+    LAND_CLEARANCE:8, CANDIDATES:48
+};
+let generationTail=[]; // 削除される描画用配列と分離し、直近2枚を保持。
+let mixedGapPlan=[];
+let lastChallenge=0.5;
+
+function phase(step){
+    if(step<=DIFFICULTY.EASY_END) return 1;
+    if(step<=DIFFICULTY.GUARANTEED_END) return 2;
+    if(step<=DIFFICULTY.MIXED_END) return 3;
+    return 4;
+}
+
+function prepareDifficulty(){
+    // 混在区間の前半に低い段を集め、後半に短い低段の窓を1回置く。
+    // 8出発段の初期値では前半3/4、後半1/4がskip可能。
+    // 高段の前後も含めて2段分を先読み。窓の位置はランごとに変える。
+    const start=DIFFICULTY.GUARANTEED_END+1;
+    const count=DIFFICULTY.MIXED_END-start+1;
+    const lateWindow=Math.random()<0.5?0.625:0.75;
+    const highEdge=start+Math.floor(count*0.375)+2;
+    const windowEdge=start+Math.floor(count*lateWindow)+1;
+    mixedGapPlan=[];
+    for(let n=start;n<=DIFFICULTY.MIXED_END+3;n++){
+        let gap=DIFFICULTY.MIX_LOW;
+        if(n>=highEdge) gap=DIFFICULTY.MIX_HIGH;
+        if(n===windowEdge||n===windowEdge+1) gap=DIFFICULTY.MIX_LOW;
+        if(n>=windowEdge+3) gap=DIFFICULTY.LATE_GAP;
+        mixedGapPlan[n]=gap+rand(-DIFFICULTY.GAP_JITTER,DIFFICULTY.GAP_JITTER);
+    }
+    lastChallenge=0.5;
+}
+
+function gapAt(n){
+    if(mixedGapPlan[n]!==undefined) return mixedGapPlan[n];
+    return (n<=DIFFICULTY.GUARANTEED_END?DIFFICULTY.EARLY_GAP:DIFFICULTY.LATE_GAP)
+        +rand(-DIFFICULTY.GAP_JITTER,DIFFICULTY.GAP_JITTER);
+}
+
+function platformSettings(origin){
+    let widths, distance;
+    if(phase(origin)===1){
+        widths=DIFFICULTY.EASY_WIDTH; distance=[24,64];
+    }else if(phase(origin)===2){
+        const t=(origin-DIFFICULTY.EASY_END)/(DIFFICULTY.GUARANTEED_END-DIFFICULTY.EASY_END);
+        widths=DIFFICULTY.EASY_WIDTH.map((v,i)=>lerp(v,DIFFICULTY.MID_WIDTH[i],t));
+        distance=[24,64]; // 幅を締める区間では距離を同時に難化しない。
+    }else if(phase(origin)===3){
+        const t=(origin-DIFFICULTY.GUARANTEED_END)/(DIFFICULTY.MIXED_END-DIFFICULTY.GUARANTEED_END);
+        widths=DIFFICULTY.MID_WIDTH.map((v,i)=>lerp(v,DIFFICULTY.LATE_WIDTH[i],t));
+        distance=[lerp(24,40,t),lerp(64,110,t)];
+    }else{
+        const t=clamp((origin-DIFFICULTY.MIXED_END)/(DIFFICULTY.CAP_STEP-DIFFICULTY.MIXED_END),0,1);
+        widths=DIFFICULTY.LATE_WIDTH.map((v,i)=>lerp(v,DIFFICULTY.CAP_WIDTH[i],t));
+        distance=[lerp(40,65,t),lerp(110,190,t)];
+    }
+    return {widths,distance};
+}
+
+// updateと同じ半陰的Euler法・落下速度上限・下降時の着地判定。
+// fps変動を含む複数の時間刻みで、共通して安全に着地する速度区間を求める。
+const VALIDATION_DT=[[1/120],[1/60],[1/30],[0.033],[1/120,0.033,1/60]];
+function landingTimes(rise,power){
+    const times=[];
+    for(const profile of VALIDATION_DT){
+        let bottom=0,vy=-lerp(CONFIG.MIN_JUMP_VY,CONFIG.MAX_JUMP_VY,power),time=0;
+        let landed=false;
+        for(let i=0;i<500;i++){
+            const dt=profile[i%profile.length],previous=bottom;
+            vy=Math.min(CONFIG.MAX_FALL_SPEED,vy+CONFIG.GRAVITY*dt);
+            bottom+=vy*dt; time+=dt;
+            if(vy>0&&previous<=-rise+CONFIG.LAND_TOLERANCE&&bottom>=-rise){
+                times.push(time); landed=true; break;
+            }
+            if(vy>0&&bottom>0) break;
+        }
+        if(!landed) return null;
+    }
+    // 任意の0<dt<=0.033にも対応。半陰的Eulerの追加落下量は
+    // g/2*Σdt² <= g/2*0.033*t。下降時の通過時刻を両包絡線で挟む。
+    // 最後のフレームが通過時刻を跨ぐ分も加え、同じ速度で着地可能にする。
+    const v=lerp(CONFIG.MIN_JUMP_VY,CONFIG.MAX_JUMP_VY,power);
+    const fastV=v-CONFIG.GRAVITY*0.033/2;
+    const fastDisc=fastV*fastV-2*CONFIG.GRAVITY*rise;
+    if(fastDisc<0) return null;
+    times.push((fastV+Math.sqrt(fastDisc))/CONFIG.GRAVITY,
+        (v+Math.sqrt(v*v-2*CONFIG.GRAVITY*rise))/CONFIG.GRAVITY+0.033);
+    return times;
+}
+
+function launchRange(p){
+    return [Math.max(player.w/2,p.x+CONFIG.LAND_MARGIN_X-player.w/2),
+        Math.min(W-player.w/2,p.x+p.w-CONFIG.LAND_MARGIN_X+player.w/2)];
+}
+function routeVelocity(from,to,center,power,times=landingTimes(from.y-to.y,power)){
+    if(!times) return null;
+    // 内側に8px以上着地。壁反射なし、方向ゲージの速度上限にも余裕。
+    const half=player.w/2;
+    const left=Math.max(half,to.x+DIFFICULTY.LAND_CLEARANCE);
+    const right=Math.min(W-half,to.x+to.w-DIFFICULTY.LAND_CLEARANCE);
+    let low=-CONFIG.MAX_VX*0.9,high=CONFIG.MAX_VX*0.9;
+    for(const t of times){
+        low=Math.max(low,(left-center)/t);
+        high=Math.min(high,(right-center)/t);
+    }
+    return low<=high?(low+high)/2:null;
+}
+function routeGuaranteed(from,to,power){
+    const times=landingTimes(from.y-to.y,power);
+    return !!times&&launchRange(from).every(x=>routeVelocity(from,to,x,power,times)!==null);
+    // 速度区間は出発xの一次式。両端が成立すれば、その間の全位置で成立。
+}
+
+function addPlatform(){
+    const previous=generationTail[generationTail.length-1];
+    const twoBack=generationTail[generationTail.length-2];
+    const n=previous.step+1, settings=platformSettings(previous.step);
+    let gap=gapAt(n);
+    const maxRise=CONFIG.MAX_JUMP_VY**2/(2*CONFIG.GRAVITY);
+    // 境界またぎも出発stepで禁止。直前のgapを含む合計に余裕を加える。
+    if(twoBack&&phase(twoBack.step)===4){
+        gap=Math.max(gap,maxRise+DIFFICULTY.NO_SKIP_MARGIN-(twoBack.y-previous.y));
+    }
+    const y=previous.y-gap;
+    const mustSkip=twoBack&&(phase(twoBack.step)<=2 ||
+        (phase(twoBack.step)===3&&twoBack.y-y<maxRise));
+    let result=null;
+    for(let attempt=0;attempt<=DIFFICULTY.CANDIDATES;attempt++){
+        // 細い→近い、遠い→広い、中間も混ぜる。厳しい種類の連続を抑える。
+        const challenge=clamp(rand(0.08,0.92),lastChallenge-0.45,lastChallenge+0.45);
+        const width=lerp(settings.widths[1],settings.widths[0],challenge);
+        const distance=lerp(settings.distance[1],settings.distance[0],challenge);
+        const pc=previous.x+previous.w/2;
+        const sign=Math.random()<0.5?-1:1;
+        // 折り返せる側を選ぶ。clampで距離だけが潰れる配置を避ける。
+        const min=14+width/2,max=W-14-width/2;
+        let center=pc+sign*distance;
+        if(center<min||center>max) center=pc-sign*distance;
+        center=clamp(center,min,max);
+        if(attempt===DIFFICULTY.CANDIDATES) center=clamp(pc,min,max);
+        const p={id:n,step:n,x:center-width/2,y,w:width,h:CONFIG.PLATFORM_H};
+        if(!routeGuaranteed(previous,p,DIFFICULTY.SINGLE_POWER)) continue;
+        if(mustSkip&&!routeGuaranteed(twoBack,p,DIFFICULTY.SKIP_POWER)) continue;
+        result=p; lastChallenge=challenge; break;
+    }
+    // 検証を通らない候補は公開しない。設定変更時も到達不能を黙って生成しない。
+    if(!result) throw new Error("Unreachable platform settings at step "+n);
+    platforms.push(result);
+    generationTail.push(result);
+    generationTail=generationTail.slice(-2);
+    nextStep=n; nextPlatformY=y;
+}
+
+function ensurePlatforms(){
+    while(nextPlatformY>cameraY-720) addPlatform();
+}
+
+function prunePlatforms(){
+    // 救済対象は「まだ画面内に見えている足場」だけ。
+    // 画面下へ完全に消えた足場は毎フレーム削除する。
+    platforms=platforms.filter(p=>{
+        const screenY=p.y-cameraY;
+        return screenY<H;
+    });
+}
+
+function resetGame(){
+    if(!spriteReady) return;
+    gameState="playing";
+    lastTime=performance.now();
+    elapsed=0;
+    playTime=0;
+    cameraY=0;
+    platforms=[];
+    nextPlatformY=0;
+    nextStep=0;
+    highestStep=0;
+    bestBeforeRun=best;
+    continueUsed=false;
+    checkpoint=null;
+    aimPhase=0;
+    charging=false;
+    charge=0;
+    chargePhase=0;
+    lockedAim=0;
+    directionLocked=false;
+
+    const baseY=560;
+    const base={id:0,step:0,x:65,y:baseY,w:230,h:CONFIG.PLATFORM_H};
+    platforms.push(base);
+
+    player.x=W/2-player.w/2;
+    player.y=baseY-player.h;
+    player.vx=0;
+    player.vy=0;
+    player.grounded=true;
+    player.currentPlatformId=base.id;
+    player.currentStep=0;
+    player.facing=1;
+
+    checkpoint={
+        platform:{...base},
+        cameraY:0
+    };
+
+    generationTail=[base];
+    prepareDifficulty();
+    nextPlatformY=baseY;
+    nextStep=0;
+    for(let i=0;i<10;i++) addPlatform();
+
+    startScreen.classList.add("hidden");
+    gameOverScreen.classList.add("hidden");
+    requestAnimationFrame(loop);
+}
+
+function aimValue(){
+    return Math.sin(aimPhase*Math.PI*2);
+}
+
+function press(){
+    if(gameState!=="playing"||!player.grounded||charging) return;
+    lockedAim=aimValue();
+    directionLocked=true;
+
+    if(Math.abs(lockedAim)>0.03){
+        player.facing=lockedAim>0?1:-1;
+    }
+
+    charging=true;
+    charge=0;
+    chargePhase=0;
+}
+
+function release(){
+    if(gameState!=="playing"||!charging) return;
+
+    charging=false;
+    const power=Math.max(0.12,charge);
+
+    player.vx=lockedAim*CONFIG.MAX_VX;
+    player.vy=-lerp(CONFIG.MIN_JUMP_VY,CONFIG.MAX_JUMP_VY,power);
+    player.grounded=false;
+    player.currentPlatformId=null;
+}
+
+function update(dt){
+    elapsed+=dt;
+    if(!continueUsed) playTime+=dt;
+
+    if(player.grounded){
+        if(!charging){
+            aimPhase+=CONFIG.AIM_SPEED*dt;
+
+            // AIM中はゲージ方向に合わせて向きを変える。
+            // 中央付近では前の向きを維持してチラつきを防ぐ。
+            const liveAim=aimValue();
+            if(liveAim>0.12){
+                player.facing=1;
+            }else if(liveAim<-0.12){
+                player.facing=-1;
+            }
+        }
+
+        if(charging){
+            chargePhase+=dt/CONFIG.CHARGE_TIME;
+            charge=1-Math.abs(1-(chargePhase%2));
+        }
+
+        const platform=platforms.find(p=>p.id===player.currentPlatformId);
+        if(platform) player.y=platform.y-player.h;
+    } else {
+        const previousBottom=player.y+player.h;
+
+        player.vy=Math.min(CONFIG.MAX_FALL_SPEED,player.vy+CONFIG.GRAVITY*dt);
+        player.x+=player.vx*dt;
+        player.y+=player.vy*dt;
+
+        if(player.x<0){
+            player.x=0;
+            player.vx=Math.abs(player.vx)*CONFIG.WALL_BOUNCE;
+            player.facing=1;
+        } else if(player.x+player.w>W){
+            player.x=W-player.w;
+            player.vx=-Math.abs(player.vx)*CONFIG.WALL_BOUNCE;
+            player.facing=-1;
+        }
+
+        if(player.vy>0){
+            const newBottom=player.y+player.h;
+
+            const candidates=platforms
+                .filter(p=>p.y>=previousBottom-CONFIG.LAND_TOLERANCE &&
+                           p.y<=newBottom+CONFIG.LAND_TOLERANCE)
+                .sort((a,b)=>a.y-b.y);
+
+            for(const p of candidates){
+                const overlapX=
+                    player.x+player.w-CONFIG.LAND_MARGIN_X>p.x &&
+                    player.x+CONFIG.LAND_MARGIN_X<p.x+p.w;
+
+                const crossedY=
+                    previousBottom<=p.y+CONFIG.LAND_TOLERANCE &&
+                    newBottom>=p.y;
+
+                if(overlapX&&crossedY){
+                    player.y=p.y-player.h;
+                    player.vx=0;
+                    player.vy=0;
+                    player.grounded=true;
+                    player.currentPlatformId=p.id;
+                    player.currentStep=p.step;
+
+                    directionLocked=false;
+                    charging=false;
+                    charge=0;
+                    chargePhase=0;
+
+                    highestStep=Math.max(highestStep,p.step);
+
+                    prunePlatforms();
+                    break;
+                }
+            }
+        }
+    }
+
+    const playerScreenY=player.y-cameraY;
+    const cameraLine=H*CONFIG.CAMERA_LINE;
+
+    if(playerScreenY<cameraLine){
+        cameraY=player.y-cameraLine;
+    }
+
+    ensurePlatforms();
+    prunePlatforms();
+
+    if(player.grounded&&player.currentPlatformId!==null){
+        const platform=platforms.find(p=>p.id===player.currentPlatformId);
+        if(platform){
+            checkpoint={
+                platform:{...platform},
+                cameraY
+            };
+        }
+    }
+
+    if(player.y-cameraY>H+60){
+        endGame();
+    }
+}
+
+function getPlayerFrame(){
+    if(!player.grounded) return FRAME_JUMP;
+    if(charging) return Math.floor(chargePhase*CONFIG.CHARGE_TIME*CONFIG.STEP_FPS)%2;
+    // During aiming, change pose only when the facing direction changes.
+    return player.facing===1?FRAME_IDLE:FRAME_STEP;
+}
+
+function drawPlayer(){
+    if(!spriteReady) return;
+
+    const frame=getPlayerFrame();
+    const sourceX=frame*FRAME_W;
+    const screenX=Math.round(player.x);
+    const screenY=Math.round(player.y-cameraY);
+
+    ctx.save();
+    ctx.imageSmoothingEnabled=false;
+
+    if(player.facing===1){
+        ctx.translate(screenX+player.w,screenY);
+        ctx.scale(-1,1);
+    } else {
+        ctx.translate(screenX,screenY);
+    }
+
+    ctx.drawImage(activeSprite,sourceX,0,FRAME_W,FRAME_H,0,0,player.w,player.h);
+
+    ctx.restore();
+}
+
+function drawPlatform(p){
+    const sy=Math.floor(p.y-cameraY);
+    if(sy<-20||sy>H+20) return;
+
+    ctx.fillStyle=LCD.ink;
+    ctx.fillRect(Math.floor(p.x),sy,Math.floor(p.w),p.h);
+}
+
+function drawMeter(){
+    if(!player.grounded) return;
+
+    const playerCenter=player.x+player.w/2;
+    const playerScreenY=player.y-cameraY;
+    const half=CONFIG.METER_W/2;
+
+    const centerX=clamp(
+        playerCenter,
+        CONFIG.METER_MARGIN+half,
+        W-CONFIG.METER_MARGIN-half
+    );
+
+    const meterY=Math.max(76,playerScreenY-32);
+
+    const plateHeight=charging?35:20;
+
+    ctx.fillStyle=LCD.paper;
+    ctx.fillRect(
+        Math.floor(centerX-half-5),
+        Math.floor(meterY-6),
+        CONFIG.METER_W+10,
+        plateHeight
+    );
+
+    ctx.strokeStyle=LCD.ink;
+    ctx.lineWidth=2;
+    ctx.strokeRect(
+        Math.floor(centerX-half),
+        Math.floor(meterY),
+        CONFIG.METER_W,
+        CONFIG.METER_H
+    );
+
+    // A discrete LCD cursor: 13 cells include an exact center position.
+    const aim=charging?lockedAim:aimValue();
+    const directionCells=13;
+    const selected=Math.round((aim*0.5+0.5)*(directionCells-1));
+    const cellWidth=CONFIG.METER_W/directionCells;
+    for(let i=0;i<directionCells;i++){
+        const x1=Math.floor(centerX-half+i*cellWidth+1);
+        const x2=Math.floor(centerX-half+(i+1)*cellWidth-1);
+        ctx.fillStyle=i===selected?LCD.ink:LCD.ghost;
+        ctx.fillRect(x1,Math.floor(meterY+2),Math.max(1,x2-x1),CONFIG.METER_H-4);
+    }
+    // Center mark sits below the bar so it cannot look like a second cursor.
+    ctx.fillStyle=LCD.ink;
+    ctx.fillRect(Math.floor(centerX-1),Math.floor(meterY+9),2,2);
+
+    if(charging){
+        const powerY=meterY+CONFIG.POWER_GAP;
+
+        ctx.strokeRect(
+            Math.floor(centerX-half),
+            Math.floor(powerY),
+            CONFIG.METER_W,
+            CONFIG.METER_H
+        );
+
+        const count=12,gap=2,cell=CONFIG.METER_W/count;
+        for(let i=0;i<count;i++){
+            ctx.fillStyle=charge>=(i+1)/count?LCD.ink:LCD.ghost;
+            ctx.fillRect(Math.floor(centerX-half+i*cell+1),Math.floor(powerY+2),cell-gap,CONFIG.METER_H-4);
+        }
+    }
+}
+
+// Seven-segment score display with subtle unlit segments.
+function drawDigits(value,x,y,scale){
+    const masks=[63,6,91,79,102,109,125,7,127,111];
+    const bars=[[2,0,8,2],[10,2,2,8],[10,12,2,8],[2,20,8,2],[0,12,2,8],[0,2,2,8],[2,10,8,2]];
+    ctx.save();ctx.translate(x,y);ctx.scale(scale,scale);
+    for(const ch of value){
+        if(ch==="."){ctx.fillStyle=LCD.ink;ctx.fillRect(0,20,2,2);ctx.translate(5,0);continue;}
+        const mask=masks[Number(ch)];
+        bars.forEach(([bx,by,bw,bh],i)=>{
+            ctx.fillStyle=mask&(1<<i)?LCD.ink:LCD.ghost;
+            ctx.fillRect(bx,by,bw,bh);
+        });
+        ctx.translate(16,0);
+    }
+    ctx.restore();
+}
+
+function draw(){
+    ctx.fillStyle=LCD.paper;
+    ctx.fillRect(0,0,W,H);
+
+
+
+    for(const p of platforms) drawPlatform(p);
+
+    drawMeter();
+    // Foreground character is drawn after all platforms and world meters.
+    drawPlayer();
+
+    ctx.fillStyle=LCD.paper;
+    ctx.fillRect(0,0,W,64);
+    ctx.fillStyle=LCD.ghost;
+    ctx.fillRect(12,63,W-24,1);
+    ctx.font="bold 9px Courier New";
+    ctx.textAlign="left";
+    ctx.fillStyle=LCD.muted;
+    ctx.fillText("HEIGHT",12,18);
+    ctx.fillText("TIME",116,18);
+    drawDigits(String(highestStep).padStart(3,"0"),12,25,1.5);
+    drawDigits(playTime.toFixed(2),116,25,1);
+    if(continueUsed){
+        ctx.textAlign="right";
+        ctx.fillStyle=LCD.muted;
+        ctx.fillText("PRACTICE",W-12,18);
+        ctx.textAlign="left";
+    }
+
+
+}
+
+function loop(now){
+    if(gameState!=="playing") return;
+
+    const dt=Math.min(
+        0.033,
+        Math.max(0,(now-lastTime)/1000)
+    );
+
+    lastTime=now;
+
+    update(dt);
+    draw();
+
+    if(gameState==="playing"){
+        requestAnimationFrame(loop);
+    }
+}
+
+function continueGame(){
+    if(gameState!=="gameover"||!checkpoint) return;
+
+    // CONTINUEを選んだ時点で、このラン全体をテスト扱いにする。
+    // 直前のGAME OVERで一時的にBESTを更新していても開始前の値へ戻す。
+    continueUsed=true;
+    if(best!==bestBeforeRun){
+        best=bestBeforeRun;
+        saveBest(best);
+    }
+
+    const saved=checkpoint.platform;
+    let platform=platforms.find(p=>p.id===saved.id);
+    if(!platform){
+        platform={...saved};
+        platforms.push(platform);
+    }
+
+    player.x=clamp(
+        platform.x+platform.w/2-player.w/2,
+        0,
+        W-player.w
+    );
+    player.y=platform.y-player.h;
+    player.vx=0;
+    player.vy=0;
+    player.grounded=true;
+    player.currentPlatformId=platform.id;
+    player.currentStep=platform.step;
+
+    cameraY=checkpoint.cameraY;
+    aimPhase=0;
+    charging=false;
+    charge=0;
+    chargePhase=0;
+    lockedAim=0;
+    directionLocked=false;
+
+    gameState="playing";
+    lastTime=performance.now();
+    gameOverScreen.classList.add("hidden");
+    requestAnimationFrame(loop);
+}
+
+function endGame(){
+    if(gameState!=="playing") return;
+
+    gameState="gameover";
+    charging=false;
+
+    if(!continueUsed&&highestStep>best){
+        best=highestStep;
+        saveBest(best);
+    }
+
+    finalScore.textContent="HEIGHT: "+String(highestStep).padStart(3,"0")+(continueUsed?" (PRACTICE)":"");
+    finalTime.textContent=continueUsed
+        ?"TIME: --"
+        :"TIME: "+playTime.toFixed(2);
+    bestScore.textContent="BEST: "+String(best).padStart(3,"0");
+
+    continueButton.disabled=!checkpoint;
+    gameOverScreen.classList.remove("hidden");
+}
+
+canvas.addEventListener("pointerdown",e=>{
+    e.preventDefault();
+    canvas.setPointerCapture?.(e.pointerId);
+    press();
+});
+
+canvas.addEventListener("pointerup",e=>{
+    e.preventDefault();
+    release();
+});
+
+canvas.addEventListener("pointercancel",e=>{
+    e.preventDefault();
+    release();
+});
+
+window.addEventListener("keydown",e=>{
+    if(e.code==="Space"&&!e.repeat){
+        e.preventDefault();
+        press();
+    }else if(e.code==="KeyC"&&!e.repeat&&gameState==="gameover"){
+        e.preventDefault();
+        continueGame();
+    }
+});
+
+window.addEventListener("keyup",e=>{
+    if(e.code==="Space"){
+        e.preventDefault();
+        release();
+    }
+});
+
+// タブ切替・画面ロックなどから復帰した直後に巨大なdtを入れない。
+document.addEventListener("visibilitychange",()=>{
+    if(gameState==="playing"){
+        lastTime=performance.now();
+    }
+});
+
+window.addEventListener("pageshow",()=>{
+    if(gameState==="playing"){
+        lastTime=performance.now();
+    }
+});
+
+// 長押し時のコンテキストメニュー等に操作を奪われないようにする。
+canvas.addEventListener("contextmenu",e=>e.preventDefault());
+
+startButton.addEventListener("click",resetGame);
+continueButton.addEventListener("click",continueGame);
+retryButton.addEventListener("click",resetGame);
+
+ctx.fillStyle=LCD.paper;
+ctx.fillRect(0,0,W,H);
+
+})();
+</script>
+</body>
+</html>

@@ -119,9 +119,11 @@ const CONFIG={
     PLAYER_SIZE:48,
     GRAVITY:980,
     MAX_FALL_SPEED:820,
-    MIN_JUMP_VY:410,
+    MIN_JUMP_VY:260,
     MAX_JUMP_VY:720,
     MAX_VX:250,
+    MAX_JUMP_ANGLE:55,
+    MIN_POWER:0.12,
     AIM_SPEED:0.72,
     CHARGE_TIME:0.85,
     STEP_FPS:5,
@@ -200,16 +202,20 @@ const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 // 難易度は「出発足場のstep」で判定。旧50～70段の別処理は統合。
 // step 0も導入区間として扱う。段階境界・上限をここで調整できる。
 const DIFFICULTY={
-    EASY_END:5, GUARANTEED_END:12, MIXED_END:20, CAP_STEP:100,
+    EASY_END:5, GUARANTEED_END:12, MIXED_END:49, CAP_STEP:130,
     EASY_WIDTH:[152,172], MID_WIDTH:[112,132],
     LATE_WIDTH:[94,120], CAP_WIDTH:[52,90],
-    EARLY_GAP:110, MIX_LOW:114, MIX_HIGH:166,
-    LATE_GAP:144, GAP_JITTER:2, NO_SKIP_MARGIN:10,
-    SINGLE_POWER:0.72, SKIP_POWER:0.98, // 一段登りは72%で届き、二段先には届かない。
+    EARLY_GAPS:[54,64,112], MIX_GAPS:[68,156,64,172,66,114,72,164],
+    LATE_LOW_GAP:64, LATE_HIGH_GAP:210,
+    GAP_JITTER:2, NO_SKIP_MARGIN:10,
+    SINGLE_POWER:0.92, SKIP_POWER:0.9865217391304348,
+    LONG_POWER:1, MIN_LONG_GAP:45,
     LAND_CLEARANCE:8, CANDIDATES:48
 };
 let generationTail=[]; // 削除される描画用配列と分離し、直近2枚を保持。
 let mixedGapPlan=[];
+let mixedSkipPlan=new Set();
+let lateGapPlan=[],lastLatePattern=-1;
 let lastChallenge=0.5;
 
 function phase(step){
@@ -220,58 +226,117 @@ function phase(step){
 }
 
 function prepareDifficulty(){
-    // 混在区間の前半に低い段を集め、後半に短い低段の窓を1回置く。
-    // 8出発段の初期値では前半3/4、後半1/4がskip可能。
-    // 高段の前後も含めて2段分を先読み。窓の位置はランごとに変える。
-    const start=DIFFICULTY.GUARANTEED_END+1;
-    const count=DIFFICULTY.MIXED_END-start+1;
-    const lateWindow=Math.random()<0.5?0.625:0.75;
-    const highEdge=start+Math.floor(count*0.375)+2;
-    const windowEdge=start+Math.floor(count*lateWindow)+1;
     mixedGapPlan=[];
-    for(let n=start;n<=DIFFICULTY.MIXED_END+3;n++){
-        let gap=DIFFICULTY.MIX_LOW;
-        if(n>=highEdge) gap=DIFFICULTY.MIX_HIGH;
-        if(n===windowEdge||n===windowEdge+1) gap=DIFFICULTY.MIX_LOW;
-        if(n>=windowEdge+3) gap=DIFFICULTY.LATE_GAP;
+    mixedSkipPlan=new Set();
+    lateGapPlan=[];
+    lastLatePattern=-1;
+    const start=DIFFICULTY.GUARANTEED_END+1;
+    // A low sideways hop followed by a taller ascent; one timed skip window.
+    const pattern=DIFFICULTY.MIX_GAPS.slice();
+    if(Math.random()<0.5){
+        [pattern[1],pattern[5]]=[pattern[5],pattern[1]];
+        mixedSkipPlan.add(start+1);mixedSkipPlan.add(start+2);
+    }else{
+        mixedSkipPlan.add(start+5);mixedSkipPlan.add(start+6);
+    }
+    pattern.forEach((gap,i)=>{mixedGapPlan[start+i]=gap+rand(-DIFFICULTY.GAP_JITTER,DIFFICULTY.GAP_JITTER);});
+    // Extend the transition through step 49, with varied but moderate ascents.
+    const transition=[66,124,140,70,136,68,148,132];
+    for(let n=21;n<=DIFFICULTY.MIXED_END;n++){
+        const t=clamp((n-21)/28,0,1);
+        let gap=transition[(n-21)%transition.length];
+        if(gap>=90) gap+=36*t;
         mixedGapPlan[n]=gap+rand(-DIFFICULTY.GAP_JITTER,DIFFICULTY.GAP_JITTER);
     }
     lastChallenge=0.5;
 }
 
-function gapAt(n){
-    if(mixedGapPlan[n]!==undefined) return mixedGapPlan[n];
-    return (n<=DIFFICULTY.GUARANTEED_END?DIFFICULTY.EARLY_GAP:DIFFICULTY.LATE_GAP)
-        +rand(-DIFFICULTY.GAP_JITTER,DIFFICULTY.GAP_JITTER);
+function prepareLateSteps(n){
+    while(lateGapPlan[n]===undefined){
+        let pattern;
+        if(lastLatePattern===-1){
+            pattern=2; // Introduce a long sideways jump just after the mixed section.
+        }else{
+            const choices=[0,1,2].filter(v=>v!==lastLatePattern);
+            pattern=choices[Math.floor(Math.random()*choices.length)];
+        }
+        const high=DIFFICULTY.LATE_HIGH_GAP,low=DIFFICULTY.LATE_LOW_GAP;
+        const blocks=[
+            [{gap:low},{gap:high}],
+            [{gap:rand(154,166)},{gap:rand(172,188)},{gap:high}],
+            [{gap:high,kind:"setup"},{gap:low,kind:"long"},{gap:high}]
+        ];
+        let index=lateGapPlan.length||DIFFICULTY.MIXED_END+1;
+        for(const entry of blocks[pattern]){
+            lateGapPlan[index++]={...entry,gap:entry.gap+rand(-DIFFICULTY.GAP_JITTER,DIFFICULTY.GAP_JITTER)};
+        }
+        lastLatePattern=pattern;
+    }
 }
 
-function platformSettings(origin){
-    let widths, distance;
+function gapAt(n){
+    let gap;
+    if(n<=DIFFICULTY.GUARANTEED_END){
+        gap=DIFFICULTY.EARLY_GAPS[(n-1)%DIFFICULTY.EARLY_GAPS.length];
+    }else if(mixedGapPlan[n]!==undefined){
+        return mixedGapPlan[n];
+    }else{
+        prepareLateSteps(n);
+        return lateGapPlan[n].gap;
+    }
+    return gap+rand(-DIFFICULTY.GAP_JITTER,DIFFICULTY.GAP_JITTER);
+}
+
+function platformSettings(origin,gap,kind="normal"){
+    const low=gap<90;
+    let widths,distance;
     if(phase(origin)===1){
-        widths=DIFFICULTY.EASY_WIDTH; distance=[24,64];
+        widths=DIFFICULTY.EASY_WIDTH;
+        distance=low?[38,76]:[10,30];
     }else if(phase(origin)===2){
         const t=(origin-DIFFICULTY.EASY_END)/(DIFFICULTY.GUARANTEED_END-DIFFICULTY.EASY_END);
         widths=DIFFICULTY.EASY_WIDTH.map((v,i)=>lerp(v,DIFFICULTY.MID_WIDTH[i],t));
-        distance=[24,64]; // 幅を締める区間では距離を同時に難化しない。
+        distance=low?[45,85]:[12,34];
     }else if(phase(origin)===3){
         const t=(origin-DIFFICULTY.GUARANTEED_END)/(DIFFICULTY.MIXED_END-DIFFICULTY.GUARANTEED_END);
         widths=DIFFICULTY.MID_WIDTH.map((v,i)=>lerp(v,DIFFICULTY.LATE_WIDTH[i],t));
-        distance=[lerp(24,40,t),lerp(64,110,t)];
+        distance=low?[lerp(50,65,t),lerp(85,110,t)]:[10,40];
     }else{
         const t=clamp((origin-DIFFICULTY.MIXED_END)/(DIFFICULTY.CAP_STEP-DIFFICULTY.MIXED_END),0,1);
         widths=DIFFICULTY.LATE_WIDTH.map((v,i)=>lerp(v,DIFFICULTY.CAP_WIDTH[i],t));
-        distance=[lerp(40,65,t),lerp(110,190,t)];
+        distance=low?[lerp(80,95,t),lerp(125,165,t)]:[lerp(8,15,t),lerp(30,45,t)];
+    }
+    if(kind==="setup"){
+        widths=[56,68];
+    }else if(kind==="long"){
+        widths=[56,72];
+        distance=[140,180];
     }
     return {widths,distance};
+}
+
+// Direction distributes launch strength between up and sideways.
+// Horizontal strength is normalized to keep full-power/full-tilt at MAX_VX.
+function jumpVelocity(aim,power){
+    power=clamp(power,CONFIG.MIN_POWER,1);
+    const maxAngle=CONFIG.MAX_JUMP_ANGLE*Math.PI/180;
+    const angle=clamp(aim,-1,1)*maxAngle;
+    const speed=lerp(CONFIG.MIN_JUMP_VY,CONFIG.MAX_JUMP_VY,power);
+    return {
+        vx:CONFIG.MAX_VX*(speed/CONFIG.MAX_JUMP_VY)
+            *(Math.sin(angle)/Math.sin(maxAngle)),
+        vy:-speed*Math.cos(angle)
+    };
 }
 
 // updateと同じ半陰的Euler法・落下速度上限・下降時の着地判定。
 // fps変動を含む複数の時間刻みで、共通して安全に着地する速度区間を求める。
 const VALIDATION_DT=[[1/120],[1/60],[1/30],[0.033],[1/120,0.033,1/60]];
-function landingTimes(rise,power){
+function landingTimes(rise,power,aim=0){
+    const launch=jumpVelocity(aim,power);
     const times=[];
     for(const profile of VALIDATION_DT){
-        let bottom=0,vy=-lerp(CONFIG.MIN_JUMP_VY,CONFIG.MAX_JUMP_VY,power),time=0;
+        let bottom=0,vy=launch.vy,time=0;
         let landed=false;
         for(let i=0;i<500;i++){
             const dt=profile[i%profile.length],previous=bottom;
@@ -287,7 +352,7 @@ function landingTimes(rise,power){
     // 任意の0<dt<=0.033にも対応。半陰的Eulerの追加落下量は
     // g/2*Σdt² <= g/2*0.033*t。下降時の通過時刻を両包絡線で挟む。
     // 最後のフレームが通過時刻を跨ぐ分も加え、同じ速度で着地可能にする。
-    const v=lerp(CONFIG.MIN_JUMP_VY,CONFIG.MAX_JUMP_VY,power);
+    const v=-launch.vy;
     const fastV=v-CONFIG.GRAVITY*0.033/2;
     const fastDisc=fastV*fastV-2*CONFIG.GRAVITY*rise;
     if(fastDisc<0) return null;
@@ -300,44 +365,75 @@ function launchRange(p){
     return [Math.max(player.w/2,p.x+CONFIG.LAND_MARGIN_X-player.w/2),
         Math.min(W-player.w/2,p.x+p.w-CONFIG.LAND_MARGIN_X+player.w/2)];
 }
-function routeVelocity(from,to,center,power,times=landingTimes(from.y-to.y,power)){
-    if(!times) return null;
-    // 内側に8px以上着地。壁反射なし、方向ゲージの速度上限にも余裕。
+// Each aim has its own vertical flight time; never combine independent x/y speeds.
+const flightCache=new Map();
+function flightOptions(rise,power){
+    const key=rise+":"+power;
+    if(flightCache.has(key)) return flightCache.get(key);
+    const options=[];
+    for(let i=-90;i<=90;i++){
+        const aim=i/100;
+        const times=landingTimes(rise,power,aim);
+        if(times) options.push({aim,...jumpVelocity(aim,power),times});
+    }
+    if(flightCache.size>=256) flightCache.delete(flightCache.keys().next().value);
+    flightCache.set(key,options);
+    return options;
+}
+function routeIntervals(from,to,power){
     const half=player.w/2;
     const left=Math.max(half,to.x+DIFFICULTY.LAND_CLEARANCE);
     const right=Math.min(W-half,to.x+to.w-DIFFICULTY.LAND_CLEARANCE);
-    let low=-CONFIG.MAX_VX*0.9,high=CONFIG.MAX_VX*0.9;
-    for(const t of times){
-        low=Math.max(low,(left-center)/t);
-        high=Math.min(high,(right-center)/t);
+    const intervals=[];
+    for(const flight of flightOptions(from.y-to.y,power)){
+        let low=half,high=W-half;
+        for(const t of flight.times){
+            low=Math.max(low,left-flight.vx*t);
+            high=Math.min(high,right-flight.vx*t);
+        }
+        if(low<=high) intervals.push({low,high,flight});
     }
-    return low<=high?(low+high)/2:null;
+    return intervals;
+}
+function routeLaunch(from,to,center,power){
+    return routeIntervals(from,to,power).find(r=>center>=r.low&&center<=r.high)?.flight||null;
 }
 function routeGuaranteed(from,to,power){
-    const times=landingTimes(from.y-to.y,power);
-    return !!times&&launchRange(from).every(x=>routeVelocity(from,to,x,power,times)!==null);
-    // 速度区間は出発xの一次式。両端が成立すれば、その間の全位置で成立。
+    // Cover the entire departure range, including positions between its endpoints.
+    const [start,end]=launchRange(from);
+    let covered=start;
+    const intervals=routeIntervals(from,to,power).sort((a,b)=>a.low-b.low);
+    for(const r of intervals){
+        if(r.high<covered) continue;
+        if(r.low>covered+1e-8) return false;
+        covered=Math.max(covered,r.high);
+        if(covered>=end) return true;
+    }
+    return false;
 }
 
 function addPlatform(){
     const previous=generationTail[generationTail.length-1];
     const twoBack=generationTail[generationTail.length-2];
-    const n=previous.step+1, settings=platformSettings(previous.step);
+    const n=previous.step+1;
     let gap=gapAt(n);
     const maxRise=CONFIG.MAX_JUMP_VY**2/(2*CONFIG.GRAVITY);
     // 境界またぎも出発stepで禁止。直前のgapを含む合計に余裕を加える。
     if(twoBack&&phase(twoBack.step)===4){
         gap=Math.max(gap,maxRise+DIFFICULTY.NO_SKIP_MARGIN-(twoBack.y-previous.y));
     }
+    const kind=lateGapPlan[n]?.kind||"normal";
+    const settings=platformSettings(previous.step,gap,kind);
     const y=previous.y-gap;
     const mustSkip=twoBack&&(phase(twoBack.step)<=2 ||
-        (phase(twoBack.step)===3&&twoBack.y-y<maxRise));
+        (phase(twoBack.step)===3&&mixedSkipPlan.has(n)));
     let result=null;
     for(let attempt=0;attempt<=DIFFICULTY.CANDIDATES;attempt++){
         // 細い→近い、遠い→広い、中間も混ぜる。厳しい種類の連続を抑える。
         const challenge=clamp(rand(0.08,0.92),lastChallenge-0.45,lastChallenge+0.45);
         const width=lerp(settings.widths[1],settings.widths[0],challenge);
-        const distance=lerp(settings.distance[1],settings.distance[0],challenge);
+        let distance=lerp(settings.distance[1],settings.distance[0],challenge);
+        if(kind==="long") distance=Math.max(distance,(previous.w+width)/2+DIFFICULTY.MIN_LONG_GAP);
         const pc=previous.x+previous.w/2;
         const sign=Math.random()<0.5?-1:1;
         // 折り返せる側を選ぶ。clampで距離だけが潰れる配置を避ける。
@@ -345,9 +441,17 @@ function addPlatform(){
         let center=pc+sign*distance;
         if(center<min||center>max) center=pc-sign*distance;
         center=clamp(center,min,max);
-        if(attempt===DIFFICULTY.CANDIDATES) center=clamp(pc,min,max);
-        const p={id:n,step:n,x:center-width/2,y,w:width,h:CONFIG.PLATFORM_H};
-        if(!routeGuaranteed(previous,p,DIFFICULTY.SINGLE_POWER)) continue;
+        if(attempt===DIFFICULTY.CANDIDATES){
+            center=kind==="long"?(pc-min>max-pc?min:max):clamp(pc,min,max);
+        }
+        if(kind==="long"&&Math.abs(center-pc)-(previous.w+width)/2<DIFFICULTY.MIN_LONG_GAP) continue;
+        let routePower=kind==="long"?DIFFICULTY.LONG_POWER:DIFFICULTY.SINGLE_POWER;
+        // Prove middle-section routes at moderate power, not merely at MAX.
+        if(n>=21&&n<30) routePower=0.74;
+        else if(n>=30&&n<40) routePower=0.79;
+        else if(n>=40&&n<=DIFFICULTY.MIXED_END) routePower=0.85;
+        const p={id:n,step:n,x:center-width/2,y,w:width,h:CONFIG.PLATFORM_H,kind,routePower};
+        if(!routeGuaranteed(previous,p,routePower)) continue;
         if(mustSkip&&!routeGuaranteed(twoBack,p,DIFFICULTY.SKIP_POWER)) continue;
         result=p; lastChallenge=challenge; break;
     }
@@ -444,10 +548,11 @@ function release(){
     if(gameState!=="playing"||!charging) return;
 
     charging=false;
-    const power=Math.max(0.12,charge);
+    const power=Math.max(CONFIG.MIN_POWER,charge);
 
-    player.vx=lockedAim*CONFIG.MAX_VX;
-    player.vy=-lerp(CONFIG.MIN_JUMP_VY,CONFIG.MAX_JUMP_VY,power);
+    const launch=jumpVelocity(lockedAim,power);
+    player.vx=launch.vx;
+    player.vy=launch.vy;
     player.grounded=false;
     player.currentPlatformId=null;
 }
@@ -709,6 +814,13 @@ function draw(){
         ctx.fillText("PRACTICE",W-12,18);
         ctx.textAlign="left";
     }
+    // A faint one-pixel frame marks the physical wall boundaries.
+    ctx.save();
+    ctx.strokeStyle="#D3D2CC";
+    ctx.lineWidth=1;
+    ctx.strokeRect(0.5,0.5,W-1,H-1);
+    ctx.restore();
+
 
 
 }

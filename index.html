@@ -119,12 +119,16 @@ const CONFIG={
     PLAYER_SIZE:48,
     GRAVITY:980,
     MAX_FALL_SPEED:820,
-    MIN_JUMP_VY:260,
-    MAX_JUMP_VY:720,
-    MAX_VX:250,
-    MAX_JUMP_ANGLE:55,
+    MIN_JUMP_VY:200.43289650,
+    MAX_JUMP_VY:555.01657633,
+    MAX_VX:324.31103444,
+    MAX_JUMP_ANGLE:20,
     MIN_POWER:0.12,
-    AIM_SPEED:0.72,
+    AIM_SPEED:0.5832,
+    VERTICAL_CAP_REDUCTION:0.20,
+    VERTICAL_CAP_POWER_START:0.55,
+    VERTICAL_CAP_ANGLE_START:15,
+    VERTICAL_CAP_ANGLE_END:25,
     CHARGE_TIME:0.85,
     STEP_FPS:5,
     METER_W:72,
@@ -203,128 +207,84 @@ const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 // step 0も導入区間として扱う。段階境界・上限をここで調整できる。
 const DIFFICULTY={
     EASY_END:5, GUARANTEED_END:12, MIXED_END:49, CAP_STEP:130,
-    EASY_WIDTH:[152,172], MID_WIDTH:[112,132],
-    LATE_WIDTH:[94,120], CAP_WIDTH:[52,90],
-    EARLY_GAPS:[54,64,112], MIX_GAPS:[68,156,64,172,66,114,72,164],
-    LATE_LOW_GAP:64, LATE_HIGH_GAP:210,
-    GAP_JITTER:2, NO_SKIP_MARGIN:10,
-    SINGLE_POWER:0.92, SKIP_POWER:0.9865217391304348,
-    LONG_POWER:1, MIN_LONG_GAP:45,
-    LAND_CLEARANCE:8, CANDIDATES:48
+    LAND_CLEARANCE:8, CANDIDATES:64, MIN_LONG_GAP:18
 };
-let generationTail=[]; // 削除される描画用配列と分離し、直近2枚を保持。
-let mixedGapPlan=[];
-let mixedSkipPlan=new Set();
-let lateGapPlan=[],lastLatePattern=-1;
+let generationTail=[];
+let layoutPlan=[];
+let lastLayoutPattern=-1;
 let lastChallenge=0.5;
 
 function phase(step){
-    if(step<=DIFFICULTY.EASY_END) return 1;
-    if(step<=DIFFICULTY.GUARANTEED_END) return 2;
-    if(step<=DIFFICULTY.MIXED_END) return 3;
+    if(step<=5) return 1;
+    if(step<=12) return 2;
+    if(step<=49) return 3;
     return 4;
 }
 
 function prepareDifficulty(){
-    mixedGapPlan=[];
-    mixedSkipPlan=new Set();
-    lateGapPlan=[];
-    lastLatePattern=-1;
-    const start=DIFFICULTY.GUARANTEED_END+1;
-    // A low sideways hop followed by a taller ascent; one timed skip window.
-    const pattern=DIFFICULTY.MIX_GAPS.slice();
-    if(Math.random()<0.5){
-        [pattern[1],pattern[5]]=[pattern[5],pattern[1]];
-        mixedSkipPlan.add(start+1);mixedSkipPlan.add(start+2);
-    }else{
-        mixedSkipPlan.add(start+5);mixedSkipPlan.add(start+6);
-    }
-    pattern.forEach((gap,i)=>{mixedGapPlan[start+i]=gap+rand(-DIFFICULTY.GAP_JITTER,DIFFICULTY.GAP_JITTER);});
-    // Extend the transition through step 49, with varied but moderate ascents.
-    const transition=[66,124,140,70,136,68,148,132];
-    for(let n=21;n<=DIFFICULTY.MIXED_END;n++){
-        const t=clamp((n-21)/28,0,1);
-        let gap=transition[(n-21)%transition.length];
-        if(gap>=90) gap+=36*t;
-        mixedGapPlan[n]=gap+rand(-DIFFICULTY.GAP_JITTER,DIFFICULTY.GAP_JITTER);
-    }
+    layoutPlan=[null,...["high","high","long","high","long","high","long","high","high","long"].map(kind=>({kind}))];
+    lastLayoutPattern=-1;
     lastChallenge=0.5;
 }
 
-function prepareLateSteps(n){
-    while(lateGapPlan[n]===undefined){
-        let pattern;
-        if(lastLatePattern===-1){
-            pattern=2; // Introduce a long sideways jump just after the mixed section.
+function layoutAt(n){
+    const blocks=[
+        ["high","long","high","long"],
+        ["high","long","high","high","long"],
+        ["high","high","long","high","long"],
+        ["high","long","high","long","high","long"],
+        [{kind:"high",challenge:"climb"},{kind:"long",challenge:"extraLong"},{kind:"high",challenge:"climb"}],
+        [{kind:"high",challenge:"diagonal"},"long","high"]
+    ];
+    while(layoutPlan[n]===undefined){
+        const choices=(layoutPlan.length>=24&&lastLayoutPattern<4?[0,0,1,2,3,4,5]:[0,0,1,2,3]).filter(v=>v!==lastLayoutPattern);
+        const pattern=choices[Math.floor(Math.random()*choices.length)];
+        for(const item of blocks[pattern]) layoutPlan.push(typeof item==="string"?{kind:item}:{...item});
+        lastLayoutPattern=pattern;
+    }
+    const entry=layoutPlan[n];
+    if(entry.gap===undefined){
+        const progress=clamp((n-12)/100,0,1);
+        // Precision sections alternate with generous landings from the first few steps.
+        const section=Math.floor(Math.max(0,n-4)/6)%3;
+        const roomy=n<=3||section===1;
+        const narrow=1-progress*0.25;
+        entry.roomy=roomy;
+        if(entry.kind==="long"){
+            entry.gap=rand(82,90);
+            entry.distance=[lerp(110,128,progress),lerp(128,150,progress)];
+            entry.widths=(roomy?[106,126]:[74,100]).map(v=>v*narrow);
+            entry.power=1;
         }else{
-            const choices=[0,1,2].filter(v=>v!==lastLatePattern);
-            pattern=choices[Math.floor(Math.random()*choices.length)];
+            entry.gap=rand(88,102);
+            entry.distance=[lerp(30,62,progress),lerp(52,92,progress)];
+            entry.widths=(roomy?[88,110]:[56,78]).map(v=>v*narrow);
+            entry.power=0.94;
         }
-        const high=DIFFICULTY.LATE_HIGH_GAP,low=DIFFICULTY.LATE_LOW_GAP;
-        const blocks=[
-            [{gap:low},{gap:high}],
-            [{gap:rand(154,166)},{gap:rand(172,188)},{gap:high}],
-            [{gap:high,kind:"setup"},{gap:low,kind:"long"},{gap:high}]
-        ];
-        let index=lateGapPlan.length||DIFFICULTY.MIXED_END+1;
-        for(const entry of blocks[pattern]){
-            lateGapPlan[index++]={...entry,gap:entry.gap+rand(-DIFFICULTY.GAP_JITTER,DIFFICULTY.GAP_JITTER)};
+        if(entry.challenge==="climb"){
+            entry.gap=rand(122,128);entry.distance=[12,48];entry.widths=[48,60];entry.power=1;
+        }else if(entry.challenge==="extraLong"){
+            entry.gap=rand(40,44);entry.distance=[165,185];entry.widths=[72,92];entry.power=1;
+        }else if(entry.challenge==="diagonal"){
+            entry.gap=rand(106,112);entry.distance=[104,120];entry.widths=[58,74];entry.power=1;
         }
-        lastLatePattern=pattern;
+        if(n===1){entry.gap=82;entry.distance=[0,16];entry.widths=[140,152];}
+        if(n===2){entry.gap=88;entry.distance=[35,52];entry.widths=[88,100];}
     }
+    return entry;
 }
 
-function gapAt(n){
-    let gap;
-    if(n<=DIFFICULTY.GUARANTEED_END){
-        gap=DIFFICULTY.EARLY_GAPS[(n-1)%DIFFICULTY.EARLY_GAPS.length];
-    }else if(mixedGapPlan[n]!==undefined){
-        return mixedGapPlan[n];
-    }else{
-        prepareLateSteps(n);
-        return lateGapPlan[n].gap;
-    }
-    return gap+rand(-DIFFICULTY.GAP_JITTER,DIFFICULTY.GAP_JITTER);
-}
-
-function platformSettings(origin,gap,kind="normal"){
-    const low=gap<90;
-    let widths,distance;
-    if(phase(origin)===1){
-        widths=DIFFICULTY.EASY_WIDTH;
-        distance=low?[38,76]:[10,30];
-    }else if(phase(origin)===2){
-        const t=(origin-DIFFICULTY.EASY_END)/(DIFFICULTY.GUARANTEED_END-DIFFICULTY.EASY_END);
-        widths=DIFFICULTY.EASY_WIDTH.map((v,i)=>lerp(v,DIFFICULTY.MID_WIDTH[i],t));
-        distance=low?[45,85]:[12,34];
-    }else if(phase(origin)===3){
-        const t=(origin-DIFFICULTY.GUARANTEED_END)/(DIFFICULTY.MIXED_END-DIFFICULTY.GUARANTEED_END);
-        widths=DIFFICULTY.MID_WIDTH.map((v,i)=>lerp(v,DIFFICULTY.LATE_WIDTH[i],t));
-        distance=low?[lerp(50,65,t),lerp(85,110,t)]:[10,40];
-    }else{
-        const t=clamp((origin-DIFFICULTY.MIXED_END)/(DIFFICULTY.CAP_STEP-DIFFICULTY.MIXED_END),0,1);
-        widths=DIFFICULTY.LATE_WIDTH.map((v,i)=>lerp(v,DIFFICULTY.CAP_WIDTH[i],t));
-        distance=low?[lerp(80,95,t),lerp(125,165,t)]:[lerp(8,15,t),lerp(30,45,t)];
-    }
-    if(kind==="setup"){
-        widths=[56,68];
-    }else if(kind==="long"){
-        widths=[56,72];
-        distance=[140,180];
-    }
-    return {widths,distance};
-}
+function gapAt(n){return layoutAt(n).gap;}
+function platformSettings(origin){return layoutAt(origin+1);}
 
 // Direction distributes launch strength between up and sideways.
-// Horizontal strength is normalized to keep full-power/full-tilt at MAX_VX.
+// One launch speed is split along the selected angle, without directional corrections.
 function jumpVelocity(aim,power){
     power=clamp(power,CONFIG.MIN_POWER,1);
-    const maxAngle=CONFIG.MAX_JUMP_ANGLE*Math.PI/180;
-    const angle=clamp(aim,-1,1)*maxAngle;
+    const angle=clamp(aim,-1,1)*CONFIG.MAX_JUMP_ANGLE*Math.PI/180;
     const speed=lerp(CONFIG.MIN_JUMP_VY,CONFIG.MAX_JUMP_VY,power);
     return {
-        vx:CONFIG.MAX_VX*(speed/CONFIG.MAX_JUMP_VY)
-            *(Math.sin(angle)/Math.sin(maxAngle)),
+        vx:speed*Math.sin(angle),
         vy:-speed*Math.cos(angle)
     };
 }
@@ -371,7 +331,7 @@ function flightOptions(rise,power){
     const key=rise+":"+power;
     if(flightCache.has(key)) return flightCache.get(key);
     const options=[];
-    for(let i=-90;i<=90;i++){
+    for(let i=-100;i<=100;i++){
         const aim=i/100;
         const times=landingTimes(rise,power,aim);
         if(times) options.push({aim,...jumpVelocity(aim,power),times});
@@ -412,51 +372,94 @@ function routeGuaranteed(from,to,power){
     return false;
 }
 
-function addPlatform(){
+function addPlatform(gapScale=1){
     const previous=generationTail[generationTail.length-1];
     const twoBack=generationTail[generationTail.length-2];
     const n=previous.step+1;
-    let gap=gapAt(n);
+    const settings=layoutAt(n);
+    const kind=settings.kind;
     const maxRise=CONFIG.MAX_JUMP_VY**2/(2*CONFIG.GRAVITY);
-    // 境界またぎも出発stepで禁止。直前のgapを含む合計に余裕を加える。
-    if(twoBack&&phase(twoBack.step)===4){
-        gap=Math.max(gap,maxRise+DIFFICULTY.NO_SKIP_MARGIN-(twoBack.y-previous.y));
+    // Every two-step ascent exceeds even the ideal straight-up MAX jump.
+    if(settings.challenge==="extraLong"&&previous.challenge!=="climb"){
+        settings.challenge=null;settings.gap=86;settings.distance=[120,145];settings.widths=[84,104];
     }
-    const kind=lateGapPlan[n]?.kind||"normal";
-    const settings=platformSettings(previous.step,gap,kind);
+    const floor=settings.challenge==="extraLong"?40:settings.challenge==="climb"?122:82;
+    const minRise=Math.max(floor,twoBack?maxRise+8-(twoBack.y-previous.y):floor);
+    const gap=Math.max(minRise,gapAt(n)*gapScale);
     const y=previous.y-gap;
-    const mustSkip=twoBack&&(phase(twoBack.step)<=2 ||
-        (phase(twoBack.step)===3&&mixedSkipPlan.has(n)));
-    let result=null;
+    let result=null,bestScore=-Infinity,bestChallenge=lastChallenge,validCandidates=0;
+    const preferLateral=n>=21&&twoBack;
     for(let attempt=0;attempt<=DIFFICULTY.CANDIDATES;attempt++){
         // 細い→近い、遠い→広い、中間も混ぜる。厳しい種類の連続を抑える。
         const challenge=clamp(rand(0.08,0.92),lastChallenge-0.45,lastChallenge+0.45);
-        const width=lerp(settings.widths[1],settings.widths[0],challenge);
+        let width=lerp(settings.widths[1],settings.widths[0],challenge);
+        if(attempt===DIFFICULTY.CANDIDATES) width=settings.widths[kind==="long"?0:1];
         let distance=lerp(settings.distance[1],settings.distance[0],challenge);
         if(kind==="long") distance=Math.max(distance,(previous.w+width)/2+DIFFICULTY.MIN_LONG_GAP);
         const pc=previous.x+previous.w/2;
-        const sign=Math.random()<0.5?-1:1;
+        const reverseWeave=false;
+        const sign=reverseWeave?-previous.travelDirection:
+            preferLateral&&previous.travelDirection&&Math.random()<0.8?previous.travelDirection:(Math.random()<0.5?-1:1);
         // 折り返せる側を選ぶ。clampで距離だけが潰れる配置を避ける。
         const min=14+width/2,max=W-14-width/2;
         let center=pc+sign*distance;
-        if(center<min||center>max) center=pc-sign*distance;
+        if(!reverseWeave&&(center<min||center>max)) center=pc-sign*distance;
         center=clamp(center,min,max);
         if(attempt===DIFFICULTY.CANDIDATES){
-            center=kind==="long"?(pc-min>max-pc?min:max):clamp(pc,min,max);
+            const fallbackSign=pc-min>max-pc?-1:1;
+            if(kind==="long"){
+                distance=Math.max(settings.distance[0],(previous.w+width)/2+DIFFICULTY.MIN_LONG_GAP);
+                center=clamp(pc+fallbackSign*distance,min,max);
+            }else{
+                const fallbackDistance=settings.distance[0];
+                center=clamp(pc+fallbackSign*fallbackDistance,min,max);
+            }
         }
-        if(kind==="long"&&Math.abs(center-pc)-(previous.w+width)/2<DIFFICULTY.MIN_LONG_GAP) continue;
-        let routePower=kind==="long"?DIFFICULTY.LONG_POWER:DIFFICULTY.SINGLE_POWER;
-        // Prove middle-section routes at moderate power, not merely at MAX.
-        if(n>=21&&n<30) routePower=0.74;
-        else if(n>=30&&n<40) routePower=0.79;
-        else if(n>=40&&n<=DIFFICULTY.MIXED_END) routePower=0.85;
-        const p={id:n,step:n,x:center-width/2,y,w:width,h:CONFIG.PLATFORM_H,kind,routePower};
+        if(kind==="long"&&(Math.abs(center-pc)<settings.distance[0]-1e-8||Math.abs(center-pc)-(previous.w+width)/2<DIFFICULTY.MIN_LONG_GAP-1e-8)) continue;
+        if(kind==="high"&&Math.abs(center-pc)<settings.distance[0]-1e-8) continue;
+        const nextSettings=layoutAt(n+1);
+        if(nextSettings.kind==="long"){
+            const nextWidth=nextSettings.widths[0];
+            const nextDistance=Math.max(nextSettings.distance[0],(width+nextWidth)/2+DIFFICULTY.MIN_LONG_GAP);
+            const nextMin=14+nextWidth/2,nextMax=W-14-nextWidth/2;
+            if(Math.max(center-nextMin,nextMax-center)<nextDistance+2) continue;
+        }
+        const routePower=settings.power;
+        const p={travelDirection:Math.sign(center-pc),id:n,step:n,x:center-width/2,y,w:width,h:CONFIG.PLATFORM_H,kind,routePower,roomy:settings.roomy,challenge:settings.challenge||null};
         if(!routeGuaranteed(previous,p,routePower)) continue;
-        if(mustSkip&&!routeGuaranteed(twoBack,p,DIFFICULTY.SKIP_POWER)) continue;
-        result=p; lastChallenge=challenge; break;
+        if(settings.challenge&&routeLaunch(previous,p,pc,0.85)) continue;
+        if(!preferLateral){result=p;bestChallenge=challenge;break;}
+        const [skipLeft,skipRight]=launchRange(twoBack);
+        const skipCenter=twoBack.x+twoBack.w/2;
+        const skipIntervals=routeIntervals(twoBack,p,1);
+        const skipFromCenter=skipIntervals.some(r=>r.low<=skipCenter&&r.high>=skipCenter);
+        let covered=0,edge=skipLeft;
+        for(const interval of skipIntervals.slice().sort((a,b)=>a.low-b.low)){
+            const lo=Math.max(skipLeft,edge,interval.low),hi=Math.min(skipRight,interval.high);
+            if(hi>lo){covered+=hi-lo;edge=hi;}
+        }
+        const skipFraction=covered/Math.max(1,skipRight-skipLeft);
+        const displacement=Math.abs(center-skipCenter);
+        const sameDirection=p.travelDirection===previous.travelDirection;
+        const score=(skipFromCenter?0:100)-skipFraction*40+displacement*0.05+(sameDirection?8:0);
+        if(score>bestScore){result=p;bestScore=score;bestChallenge=challenge;}
+        validCandidates++;
+        if(skipFraction===0||validCandidates>=6) break;
     }
     // 検証を通らない候補は公開しない。設定変更時も到達不能を黙って生成しない。
-    if(!result) throw new Error("Unreachable platform settings at step "+n);
+    if(!result){
+        // Shorter horizontal reach can require a lower ascent; publish only validated routes.
+        if(gapScale>0.1) return addPlatform(gapScale*0.85);
+        if(settings.challenge){
+            settings.challenge=null;settings.gap=92;
+            settings.distance=kind==="long"?[120,145]:[30,62];
+            settings.widths=kind==="long"?[84,104]:[72,100];
+            settings.power=kind==="long"?1:0.94;
+            return addPlatform();
+        }
+        throw new Error("Unreachable platform settings at step "+n);
+    }
+    lastChallenge=bestChallenge;
     platforms.push(result);
     generationTail.push(result);
     generationTail=generationTail.slice(-2);
@@ -477,6 +480,10 @@ function prunePlatforms(){
 }
 
 function resetGame(){
+    return startRun(0);
+}
+
+function startRun(attempt){
     if(!spriteReady) return;
     gameState="playing";
     lastTime=performance.now();
@@ -519,11 +526,21 @@ function resetGame(){
     prepareDifficulty();
     nextPlatformY=baseY;
     nextStep=0;
-    for(let i=0;i<10;i++) addPlatform();
+    try{
+        for(let i=0;i<10;i++) addPlatform();
+        // Validate every platform required by the first update before hiding the title.
+        ensurePlatforms();
+    }catch(error){
+        if(attempt<16&&error.message.startsWith("Unreachable platform settings")){
+            return startRun(attempt+1);
+        }
+        throw error;
+    }
 
     startScreen.classList.add("hidden");
     gameOverScreen.classList.add("hidden");
-    requestAnimationFrame(loop);
+    draw();
+    scheduleLoop();
 }
 
 function aimValue(){
@@ -825,6 +842,21 @@ function draw(){
 
 }
 
+// Keep the game visible immediately, including previews that delay animation frames.
+function scheduleLoop(){
+    let delivered=false;
+    let frameId;
+    const deliver=now=>{
+        if(delivered) return;
+        delivered=true;
+        clearTimeout(timerId);
+        if(frameId!==undefined) cancelAnimationFrame(frameId);
+        loop(now);
+    };
+    const timerId=setTimeout(()=>deliver(performance.now()),100);
+    frameId=requestAnimationFrame(deliver);
+}
+
 function loop(now){
     if(gameState!=="playing") return;
 
@@ -839,7 +871,7 @@ function loop(now){
     draw();
 
     if(gameState==="playing"){
-        requestAnimationFrame(loop);
+        scheduleLoop();
     }
 }
 
@@ -884,7 +916,8 @@ function continueGame(){
     gameState="playing";
     lastTime=performance.now();
     gameOverScreen.classList.add("hidden");
-    requestAnimationFrame(loop);
+    draw();
+    scheduleLoop();
 }
 
 function endGame(){

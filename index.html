@@ -244,7 +244,7 @@ function layoutAt(n){
     }
     const entry=layoutPlan[n];
     if(entry.gap===undefined){
-        const progress=clamp((n-12)/100,0,1);
+        const progress=clamp((n-12)/88,0,1);
         // Precision sections alternate with generous landings from the first few steps.
         const section=Math.floor(Math.max(0,n-4)/6)%3;
         const roomy=n<=3||section===1;
@@ -270,6 +270,10 @@ function layoutAt(n){
         }
         if(n===1){entry.gap=82;entry.distance=[0,16];entry.widths=[140,152];}
         if(n===2){entry.gap=88;entry.distance=[35,52];entry.widths=[88,100];}
+        // After step 100, only landing widths keep tightening, with a playable lower bound.
+        const lateWidthScale=Math.max(0.45,1-Math.max(0,n-100)*0.0025);
+        entry.widths=entry.widths.map(width=>Math.max(28,width*lateWidthScale));
+        entry.lateWidthScale=lateWidthScale;
     }
     return entry;
 }
@@ -381,7 +385,7 @@ function addPlatform(gapScale=1){
     const maxRise=CONFIG.MAX_JUMP_VY**2/(2*CONFIG.GRAVITY);
     // Every two-step ascent exceeds even the ideal straight-up MAX jump.
     if(settings.challenge==="extraLong"&&previous.challenge!=="climb"){
-        settings.challenge=null;settings.gap=86;settings.distance=[120,145];settings.widths=[84,104];
+        settings.challenge=null;settings.gap=86;settings.distance=[120,145];settings.widths=[84,104].map(w=>Math.max(28,w*(settings.lateWidthScale||1)));
     }
     const floor=settings.challenge==="extraLong"?40:settings.challenge==="climb"?122:82;
     const minRise=Math.max(floor,twoBack?maxRise+8-(twoBack.y-previous.y):floor);
@@ -453,7 +457,7 @@ function addPlatform(gapScale=1){
         if(settings.challenge){
             settings.challenge=null;settings.gap=92;
             settings.distance=kind==="long"?[120,145]:[30,62];
-            settings.widths=kind==="long"?[84,104]:[72,100];
+            settings.widths=(kind==="long"?[84,104]:[72,100]).map(w=>Math.max(28,w*(settings.lateWidthScale||1)));
             settings.power=kind==="long"?1:0.94;
             return addPlatform();
         }
